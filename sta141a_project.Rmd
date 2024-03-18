@@ -1,0 +1,1431 @@
+---
+title: "STA141A Final Project"
+author: "Hannah Wen - 920776210"
+date: "2024-03-18"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+### Abstract
+
+The brain is one of the most complex organs which hoards tons of information on how we make our decisions. This holds true for not only humans, but mice. The 2019 Steinmetz study on the neural activities of mice during a visual task provide an in-depth look of the ways aspects such as brain areas and neural spikes interact with each other to form a decision. This data is utilized in this project to perform exploratory data analysis to compile all of the data into one structure to be used to train and build a predictive model which will predict whether a mouse turned the wheel in the correct manner using the data provided as well as newly engineered features. This project found that the averaged time bins of each trial and the average number of spikes of the most active neurons proved to have heterogeneous patterns across trials and sessions and were transformed into additional variables. During this exploratory data analysis, it was also noted that behavior varied depending on the type of correct expected turn, resulting in 3 different models being made as the final model. Logistic regression, ridge regression, and random forest models were tested. The final model consists of 1 ridge regression model, 1 random forest model, and 1 random forest model with 10-fold cross validation. 
+
+### Section 1: Introduction       
+
+In 2019, Nicholas A. Steinmetz, Peter Zatka-Haas, Matteo Carandini, and Kenneth D. Harris conducted a study which examined the performance of a group of mice in performing a task which involved turning a wheel to indicate which of the left or right visual stimulus had a larger contrast. The correct expected wheel turn depended on which side had a larger contrast. When the contrasts were equal, the wheel is expected to be held still. There were also random trials in which the contrasts were present but equal, resulting in the correct answer being random. The brain activity of the mice was also recorded after a surgical procedure to attach a steel head plate and recording chamber to monitor brain activity. This study aims to reveal the possible patterns behind brain activity when making decisions on a visual discriminatory task. Whether the mouse turn the wheel correctly or not was noted by the feedback type which either was a -1 for failure or 1 for success. Mice were given rewards if they turned the wheel correctly. The purpose of this project is to examine the information given which may help accurately predict whether a specific trial of a mouse led to a failure or success. Originally this experiment collected the information on the performance of 10 mice over 39 sessions. For the purpose of this project, the data was reduced to 18 sessions covering the performance of 4 different mice.   
+
+### Section 2: Exploratory Analysis
+
+
+```{r, message = FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(ggcorrplot)
+library(knitr)
+library(kableExtra)
+library(car)
+library(glmnet)
+library(caret)
+library(MASS)
+library(patchwork)
+library(randomForest)
+library(pROC)
+```
+
+Each session consists of 8 lists. Within those lists, there are two additional lists named "spks" and "time" which track the spikes of neurons in the visual cortex within the time bins in the list "time". In "spks", there are matrices with the number of rows representing the number of neurons and the columns representing the number of time bins. A 1 indicates a neuron fire while a 0 represents no activity. There are 40 times bins and the number of neurons depends on the session. The other 6 lists consist of lists of the mouse name, date, left contrast, right contrast, time stamps, and brain area for each neuron. Each entry in the list represents the information for one trial within the session. The feedback type represents whether the mouse turned the wheel in the expected manner or not. A 1 indicates a success and a -1 indicates failure. The contrasts represent the contrast of the stimulus on the right and left side. The time stamps are the centers for the 40 time bins among each trial.
+
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('/Users/hannahwen/Desktop/STA141A/sessions/session',i,'.rds',sep=''))
+}
+
+
+# in library tidyverse
+meta <- tibble(
+  mouse_name = rep('name', 18),
+  date_exp =rep('dt', 18),
+  n_brain_area = rep(0, 18),
+  n_neurons = rep(0, 18),
+  n_trials = rep(0, 18),
+  success_rate = rep(0, 18)
+)
+
+
+for(i in 1:18){
+  tmp = session[[i]];
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+  }
+```
+
+```{r}
+total_rates = meta %>% pull(success_rate) %>% mean()
+```
+
+Summarizing over all sessions, there are 16,305 trials covering the work of mice Cori, Forssmann, Hench, and Lederberg. The overall success rate is approximately 70.74%.  
+
+```{r, fig.align='center'}
+kable(meta) %>% kable_styling
+```
+<center>
+
+**Figure 2.1: Table of the generalized sessions.**
+
+</center>
+
+```{r}
+# Cori, first 3 sessions 
+cori = data.frame()
+for (c in 1:3){
+  dates = list(rep(session[[c]]$date_exp, length(session[[c]]$contrast_left)))
+  names(dates) = "date"
+  session_names = rep(paste("Session ", c, sep = ''), length(session[[c]]$contrast_left))
+  current_cori = data.frame(session[[c]][c("contrast_left", "contrast_right", "feedback_type")], dates, session_names)
+  cori = rbind(cori, current_cori)
+}
+
+# Forssmann, sessions 4-7
+forssmann = data.frame()
+for (c in 4:7){
+  dates = list(rep(session[[c]]$date_exp, length(session[[c]]$contrast_left)))
+  names(dates) = "date"
+  session_names = rep(paste("Session ", c, sep = ''), length(session[[c]]$contrast_left))
+  current_forssmann = data.frame(session[[c]][c("contrast_left", "contrast_right", "feedback_type")], dates, session_names)
+  forssmann = rbind(forssmann, current_forssmann)
+}
+
+# Hench, sessions 8-11
+hench = data.frame()
+for (c in 8:11){
+  dates = list(rep(session[[c]]$date_exp, length(session[[c]]$contrast_left)))
+  names(dates) = "date"
+  session_names = rep(paste("Session ", c, sep = ''), length(session[[c]]$contrast_left))
+  current_hench = data.frame(session[[c]][c("contrast_left", "contrast_right", "feedback_type")], dates, session_names)
+  hench = rbind(hench, current_hench)
+}
+
+# Lederberg, sessions 12-18
+lederberg = data.frame()
+for (c in 12:18){
+  dates = list(rep(session[[c]]$date_exp, length(session[[c]]$contrast_left)))
+  names(dates) = "date"
+  session_names = rep(paste("Session ", c, sep = ''), length(session[[c]]$contrast_left))
+  current_lederberg = data.frame(session[[c]][c("contrast_left", "contrast_right", "feedback_type")], dates, session_names)
+  lederberg = rbind(lederberg, current_lederberg)
+}
+```
+
+```{r, fig.align = 'center'}
+# Cori 
+ggplot(data = cori, aes(x = feedback_type, fill = session_names)) + geom_histogram(bins = 3) + facet_wrap(~ session_names, ncol = 3) + 
+  labs(title = "Successes and Failures for Mouse Cori", x = "Feedback Type", y = "Count", fill = "Session Name")
+```
+
+<center>
+
+**Figure 2.2: Barchart of successes and failures for the sessions of Mouse Cori.**
+
+</center>
+
+Above are the graphs of successes and failures among the 3 sessions for mouse Cori. For sessions 1-3, the success rates are 60.5%, 63.3%, and 66.2%, respectively. The success rates slowly increase with each session differing by only a few percent between each rate. Sessions 2 and 3 also have considerably higher number of trials than session 1. Session 1 has 114 trials while Session 2 and 3 have 251 and 228 trials, respectively.
+
+```{r, fig.align = 'center'}
+ggplot(data = forssmann, aes(x = feedback_type, fill = session_names)) + geom_histogram(bins = 3)+  facet_wrap(~ session_names) +
+  labs(title = "Successes and Failures for Mouse Forssmann", x = "Feedback Type", y = "Count", fill = "Session Name")
+```
+
+<center>
+
+**Figure 2.3: Barchart of successes and failures for the sessions of Mouse Forssmann.**
+
+</center>
+
+Sessions 4-7 cover mouse Forssmann's performance, with success rates of 66.7%, 74.1%, 67.1%, and 64.4%, respectively. The success rate has no clear pattern with the progression of sessions, with success rate peaking during session 5 then going back down. Forssmann has a more consistent number of trials for each session, ranging from 249-290 trials per session. Session 6 has 290 trials while the rest of Forssmann's lie very close to 250. However, there is no implication on the number of trials and success rate for mouse Forssmann.
+
+```{r, fig.align = 'center'}
+hench$session_names = factor(hench$session_names, levels = paste("Session", 8:11))
+ggplot(data = hench, aes(x = feedback_type, fill = session_names)) + geom_histogram(bins = 3) + facet_wrap(~ session_names) + 
+  labs(title = "Successes and Failures for Mouse Hench", x = "Feedback Type", y = "Count", fill = "Session Name")
+```
+
+<center>
+
+**Figure 2.4:  Barchart of successes and failures for the sessions of Mouse Hench.**
+
+</center>
+
+Mouse Hench's performance is covered by sessions 8-11. Hench's success rates are 64.4%, 68.5%, 62.0%, and 79.5% for sessions 8-11, respectively. There is more variation among the success rates over the 4 sessions, as well as the number of trials. Session 8-11 have 250, 372, 447, and 342 trials, respectively. There is also no distinct pattern between the number of trials and success rates for mouse Hench.
+
+```{r, fig.align = 'center'}
+ggplot(data = lederberg, aes(x = feedback_type, fill = session_names)) + geom_histogram(bins = 3) + facet_wrap(~ session_names) + 
+  labs(title = "Successes and Failures for Mouse Lederberg", x = "Feedback Type", y = "Count", fill = "Session Name")
+```
+
+<center>
+
+**Figure 2.5: Barchart of successes and failures for the sessions of Mouse Lederberg.**
+
+</center>
+
+Lederberg has fairly high success rates across the last 6 sessions. For sessions 12-18, Lederberg's success rates are 73.8%, 79.7%, 69.4%, 76.5%, 71.8%, 82.0%, and 80.6%, respectively. The number of trials are 340, 300, 268, 404, 280, 224, and 216, respectively. Over the sessions, Lederberg's performance does not seem to increase or decrease in a clear pattern.
+
+In conclusion, the success rates for each session for each mouse do not have distinct relationships with the progression of sessions or number of trials. However, it is clear the the performance differs wildly for each mouse, which will be considered while further investigating performance. To further examine the mouse performance for each session, the number of brain areas will be explored next.
+
+```{r, fig.align = 'center'}
+ggplot(data = meta, aes(x = n_brain_area, y = success_rate, col = mouse_name)) + geom_point() + labs(title = "Number of Brain Areas vs. Success Rate",
+        x = "Number of Brain Areas", y = "Success Rate") 
+```
+
+<center>
+
+**Figure 2.6: Graph of number of brain areas plotted against success rate for each mouse.**
+
+</center>
+
+This plot depicts the relationship between the number of brain areas per session and the associated success rate for the session. Each of the 4 colors of the points represent which mouse it represents. As observed, there is no clear pattern between the two. However, similar success rates for each mouse are observed. Lederberg's points typically lie on the upper half of the y-axis, with success rates ranging from roughly 70-85%. Hench has points varying wildly on the y-axis, going from as high as nearly 80% to as low as 62%. It also is observed that Hench has a lower success rate when the number of brain areas increases. Forssmann's success rate varies less, lying between 65-75%, and also decreases as the number of brain areas increases. Cori has the lowest points overall, ranging between 60-67.5%. Cori's success rate does not appear to have a relationship with the number of brain areas.
+
+It appears that there is no general pattern between the number of brain areas per session and success rate but for each mouse, there may be evidence for further investigation of the brain areas.
+
+```{r}
+# getting vector of 
+all_areas = c()
+areas_sesh = list()
+min = 20
+max = 0
+max_i = 0
+min_i = 0
+for (i in 1:18){
+  areas = unique(session[[i]]$brain_area)
+  if (length(areas) > max){
+    max = length(areas)
+    max_i = i
+  }
+  if (length(areas) < min){
+    min = length(areas)
+    min_i = i
+  }
+  all_areas = c(all_areas, areas)
+}
+```
+
+```{r, fig.align = 'center'}
+area_count = data.frame(all_areas) # creating data frame of all of the different 
+halfpoint = length(area_count)%/% 2 # creating a half point so i can split my data
+ggplot(data = area_count, aes(x=all_areas)) + geom_bar() + coord_flip() + scale_x_discrete(guide = guide_axis(n.dodge=2)) + theme_minimal() + 
+  labs(title = "Frequency of Areas of the Brain", x = "Area of the Brain", y = "Count")
+```
+
+<center>
+
+**Figure 2.7: Barchart of frequency of each brain area across all sessions.**
+
+</center>
+
+Here is the distribution of the frequency of each area in the brain. Most of the brain areas are only recorded in one session. However, there are several areas which occur in multiple sessions such as ZI and ACA. Only a couple brain areas occur in over 10 different sessions: root and CA1. The most popular brain area is root, with 16 appearances. This demonstrates that certain areas are more present than others. This suggests the possibility of a brain area having a relationship with the success rate. Because every session has a different number of distinct brain areas, this relationship will be examined by taking the three most popular brain areas for each session.
+
+```{r}
+popular_areas <- tibble(
+  area_1 = rep("area", 18),
+  area_2 = rep("area", 18),
+  area_3 = rep("area", 18)
+)
+
+
+for(i in 1:18){
+  s = session[[i]];
+  areas = names(sort(table(s$brain_area), decreasing = TRUE));
+  popular_areas[i, "area_1"] = areas[1];
+  popular_areas[i, "area_2"] = areas[2];
+  popular_areas[i, "area_3"] = areas[3];
+  
+}
+meta_areas = bind_cols(meta, popular_areas)
+all_top_3 = c(meta_areas$area_1, meta_areas$area_2, meta_areas$area_3)
+unique_top_3 = unique(all_top_3)
+top_area_freq = sort(table(all_top_3), decreasing = TRUE)
+kable(meta_areas)
+```
+
+<center>
+
+**Figure 2.8: Table of the origin brain areas of the top 3 most active neurons for each session.**
+
+</center>
+
+By looking at the top 3 brain areas for each session, it is observed that root is the most common top brain area by being a top 3 brain area for 6 different sessions for all mice except Cori. TH is observed 4 times, in the sessions for Forssmann and Lederberg. Most brain areas only appear once or twice.
+
+```{r}
+top_area_freq_v2 = top_area_freq[top_area_freq > 1]
+top_area_means = tibble(
+  area = rep("area", length(top_area_freq_v2)),
+  mean_rate = rep(0, length(top_area_freq_v2))
+)
+for (i in 1:length(top_area_freq_v2)){
+  area = names(top_area_freq_v2)[i];
+  top_area_means[i, "area"] = area;
+  top_area_means[i, "mean_rate"] = meta_areas %>% filter(area_1 == area| area_2 == area | area_3 == area) %>% pull(success_rate) %>% mean();
+}
+kable(top_area_means,digits=4) 
+```
+
+<center>
+
+**Figure 2.9: Table of the average success rates of each origin brain area of the top neurons.**
+
+</center>
+
+Here is a table of the mean success rate for the brain areas which appeared more than once. The average rate for CP, which occurs once in Hench and Lederberg each, is the highest at 80.04%. The average rate for VISp, which occurs twice in only Cori's sessions, is the lowest at 63.38%. These rates can be explained by the fact that the associated top brain areas specifically occurred in sessions with a lower success rate. However, this does indicate that the top brain area is dependent on the session, and suggests that there are top brain areas depending on the trial.
+
+To look into the structure of trials, the data structure needs to be standardized across all trials for the data to be explored. A tibble is created with each entry representing information on each trial. Each observation consists of the session number, the mouse name, the date, the trial number within the session, the start time, the left and right contrast, and the feedback type. New features were also added to further examine possible relationships between variables. Turn expectation, which is a string representing the correct expected turn is created through calculating the difference between the left and right contrasts. The names of the top 3 brain areas for the top 3 neurons each trial are recorded as well as their associated average number of spikes. The first, second, and third top brain areas are ordered in decreasing order of how high their firing rates are. The number of distinct brain areas, number of spikes, average number of spikes, number of neurons, and average spikes per neuron are also recorded.
+
+```{r}
+# getting total # of trials 
+total_trials = 0
+for (i in 1:18){
+  total_trials = total_trials + length(session[[i]]$feedback_type)
+}
+
+sessions_more = tibble(
+  session_num = rep(0, total_trials),
+  mouse_name = rep('name', total_trials),
+  date_exp =rep('dt', total_trials),
+  trial_n = rep(0, total_trials),
+  start_time = rep(0, total_trials),
+  contrast_left = rep(0, total_trials),
+  contrast_right = rep(0, total_trials),
+  contrast_diff = rep(0, total_trials),
+  turn_expectation = rep("turn", total_trials),
+  feedback = rep(0, total_trials),
+  n_brain_area = rep(0, total_trials),
+  n_spikes = rep(0, total_trials),
+  avg_n_spikes = rep(0, total_trials),
+  n_neurons = rep(0, total_trials),
+  avg_spikes_per_neuron = rep(0, total_trials),
+  top_area_1 = rep("area", total_trials),
+  top_area_2 = rep("area", total_trials),
+  top_area_3 = rep("area", total_trials),
+  avg_spike_area1 = rep(0, total_trials),
+  avg_spike_area2 = rep(0, total_trials),
+  avg_spike_area3 = rep(0, total_trials)
+)
+index = 0
+for(i in 1:18){
+  sesh = session[[i]]
+  t_len = length(sesh$feedback_type)
+  for (t in 1:t_len){
+    index = index + 1
+    sessions_more[index, "session_num"] = i
+    sessions_more[index, "mouse_name"] = sesh$mouse_name
+    sessions_more[index, "date_exp"] = sesh$date_exp
+    sessions_more[index, "trial_n"] = t
+    sessions_more[index, "start_time"] = sesh$time[[t]][1]
+    left = sesh$contrast_left[t]
+    right = sesh$contrast_right[t]
+    sessions_more[index, "contrast_left"] = left
+    sessions_more[index, "contrast_right"] = right
+    sessions_more[index, "contrast_diff"] = left - right 
+    sessions_more[index, "turn_expectation"] = ifelse(left > right, "right", ifelse(right > left, "left", ifelse(right == left & right ==0, "still", "random")))
+
+    # will need to add in type_contrast later
+    sessions_more[index, "feedback"] = sesh$feedback_type[t]
+    sessions_more[index, "n_brain_area"] = length(unique(sesh$brain_area))
+    sessions_more[index, "n_spikes"] = sum(colSums(sesh$spks[[t]]))
+    sessions_more[index, "avg_n_spikes"] = mean(colSums(sesh$spks[[t]]))
+    sessions_more[index, "n_neurons"] = dim(sesh$spks[[t]])[1]
+    sessions_more[index, "avg_spikes_per_neuron"] = sum(colSums(sesh$spks[[t]])) / dim(sesh$spks[[t]])[1]
+    neuron_sums = sesh$spks[[t]] %>% rowSums()
+    area_indices = neuron_sums %>% order(decreasing = TRUE)
+    sessions_more[index, "top_area_1"] = sesh$brain_area[area_indices[1]]
+    sessions_more[index, "top_area_2"] = sesh$brain_area[area_indices[2]]
+    sessions_more[index, "top_area_3"] = sesh$brain_area[area_indices[3]]
+    sessions_more[index, "avg_spike_area1"] = neuron_sums[area_indices[1]] / 40 
+    sessions_more[index, "avg_spike_area2"] = neuron_sums[area_indices[2]] / 40 
+    sessions_more[index, "avg_spike_area3"] = neuron_sums[area_indices[3]] / 40 
+  }
+}
+
+
+```
+
+```{r}
+kable(head(sessions_more, 5), format = "html", table.attr = "class='table table-striped'",digits=2) 
+```
+
+<center>
+
+**Figure 2.10: First 5 rows of expanded dataframe depicting each trial.**
+
+</center>
+
+```{r}
+cori_sesh_more = sessions_more %>% filter(mouse_name == "Cori") 
+kable(list(cori_sesh_more %>% dplyr::select(c(top_area_1, feedback))%>% table(), 
+           cori_sesh_more %>% dplyr::select(c(top_area_1, feedback))%>% table() %>% prop.table(margin = 1)), format = "html", 
+      table.attr = "class='table table-striped'") %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.11: Frequency and proportion table of the origin brain area of the most active neuron and feedback type for mouse Cori.**
+
+</center>
+
+There are 15 distinct areas which are origin for the top firing neuron for 593 trials. MRN appears to be the most popular top brain area for mouse Cori by appearing as the top brain area for 205 trials. Approximately 68.78% of the trials where MRN is the top brain area are successful. The frequency of the top area ranges from 1-205, which makes it harder to draw conclusions on the type of top brain area and success rate. However, CA1 and CA3 both have similar frequencies of 59 and 55, respectively, but CA1's trials success rate is 59.32% while CA3's success rate is 45.45%. This is considerable difference which indicates that the top brain areas for each trial may be a valuable feature.
+
+```{r}
+kable(list(cori_sesh_more %>% dplyr::select(c(top_area_2, feedback))%>% table(), 
+           cori_sesh_more %>% dplyr::select(c(top_area_2, feedback))%>% table() %>% prop.table(margin = 1)), format = "html", 
+      table.attr = "class='table table-striped'") %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.12: Frequency and proportion table of the the second most active neuron's brain area and feedback type for mouse Cori**
+
+</center>
+
+For the second highest firing neuron, the distinct areas appear to be the same with the inclusion of area NB, which only occurs once. This indicates that the most active neurons will tend to come from the same areas. Additionally, the success rates for each area are similar to those of the same area for the top firing neuron. For example, CA1's success rate is 64.15% which is significantly higher than CA3's success rate of 50%. MRN remains the most popular brain area origin, with a success rate of 66.7%, very similar to its success rate when it represents the top firing neuron.
+
+```{r}
+kable(list(cori_sesh_more %>% dplyr::select(c(top_area_3, feedback))%>% table(), 
+           cori_sesh_more %>% dplyr::select(c(top_area_3, feedback))%>% table() %>% prop.table(margin = 1)), format = "html", 
+      table.attr = "class='table table-striped'") %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.13: Frequency and proportion table of the the 3rd most active neuron's brain area and feedback type for mouse Cori.**
+
+</center>
+Looking into the frequency and proportion table for brain area origins of the third most active neuron for mouse Cori, it is observed that the number of distinct areas has increased to 17, including the areas MOs, which occurs only once similar to the area NB which was a new addition when moving from the top firing neuron to the second most active neuron. The behavior for certain areas have change. For example, CA1's success rate is 70% which is very similar to CA3's success rate of 68.8%. Additionally, POST has a similar frequency of 48 to the POST origin area for the first and second most active neurons, but has a very similar success rate of 64.6% to the POST success rate of 64.3% for the 1st most active neurons while the POST success rate for the second most active neurons is exactly 50%. This demonstrates that the ranking of activeness for the brain origin may have a relationship with the success rate.
+
+```{r, fig.align='center'}
+sessions_factorized = sessions_more 
+sessions_factorized$feedback = as.factor(sessions_factorized$feedback)
+sessions_factorized$session_num = as.factor(sessions_factorized$session_num)
+
+ggplot(sessions_factorized, aes(x=mouse_name, y=avg_spike_area1, color=feedback)) + 
+  geom_violin() + labs(x = "Mouse", y = "Avg. Number of Spikes for 1st Most Active Neuron")
+```
+<center>
+
+**Figure 2.14: Violin plots for the average number of spikes of the top neuron for each mouse depending on feedback type.**
+
+</center>
+
+
+The averages range from approximately 0.25 to 3.5. It appears that there are not many discrepancies between the mice or feedback type. The ranges for successes appear to be slightly wider than the range for fails across all mice. The distributions are very similar within each mouse. However, it appears that for Cori and Hench, the widest region of the plot for failures is lower than the widest region for successes, indicating that most points are typically located at a slightly lower average number of spikes for failures. For Forssmann, the opposite holds true. For Lederberg, failures have a larger concentration of points but at the same place where the largest concentration of points for successes are. Lederberg has the highest range of average spikes while Cori has the smallest.
+
+```{r, fig.align='center'}
+ggplot(sessions_factorized, aes(x=mouse_name, y=avg_spike_area2, color=feedback)) + 
+  geom_violin() + labs(x = "Mouse", y = "Avg. Number of Spikes for 2nd Most Active Neuron")
+```
+
+<center>
+
+**Figure 2.15: Violin plots for the average number of spikes for the 2nd most active neurons for each mouse according to feedback type.**
+
+</center>
+
+The averages range from approximately 0.175 to 2, which is a lower range than the one for the 1st most active neuron. Similar to the first set of violin plots, within each mouse, the distributions are very similar. It is observed that Forssmann has the largest range and Cori has the smallest. Cori's distribution for failures has a larger concentration of points at the bottom and is slightly different shaped from the one for successes. In this visual, it is also observed that the success distributions have wider ranges than the negative distributions for each mouse. Even Hench, who did not show this behavior for the most active neuron.
+
+```{r, fig.align='center'}
+ggplot(sessions_factorized, aes(x=mouse_name, y=avg_spike_area3, color=feedback)) + 
+  geom_violin() + labs(x = "Mouse", y = "Avg. Number of Spikes for 3rd Most Active Neuron")
+```
+
+<center>
+
+**Figure 2.16: Violin plots for the average number of spikes for the 3rd most active neuron for each mouse depending on feedback type.**
+
+</center>
+
+The average ranges from approximately 0.2 to 1.6, which is the lowest and smallest distribution of average spikes among the top 3 neurons. The distributions within each mouse are also similar to each other like the previous plots for the top 2 neurons, with the same observation that certain distributions for failures have their widest concentrations of points at lower averages than the distributions for successes. This pattern is observed for mice Cori and Hench while mice Forssmann and Lederberg have their widest concentrations at very similar values for both failures and successes.
+
+Through observing the violin plots for the average number of spikes for the 3 most active neurons, it is concluded that this feature may not be very valuable to predicting the feedback type due to the similarities of the distributions for each feedback type among the different mice. However, there can be slight differences between the distributions which vary depending on the mouse and neuron activity ranking.
+
+To more rigorously test whether the origin area and average number of spikes for the most active neurons affect the success rate, a two-way anova test will be performed on the origin area of the most active neuron and its average number of spikes.
+
+```{r}
+summary(aov(feedback ~ top_area_1 + avg_spike_area1 + avg_spike_area1:top_area_1, data = sessions_more))
+```
+
+<center>
+
+**Figure 2.17: 2-way anova test results for feedback according to the origin brain area of the most active neuron and its average number of spikes.**
+
+</center>
+
+The two-way anova test states that both variables including their interaction term are statistically significant because all of their p-values are lower than 0.05. This indicates that not only would changing the origin area and the average number of spikes may change the feedback type, but that the relationship between area and average number of spikes changes depending on which origin area the most active neuron is from.
+
+Moving forward from analyzing the effect of brain area on feedback type, the contrasts in brain stimulus will be investigated.
+
+```{r}
+condense_trials = function(sesh_df){
+  condensed_trials = matrix(nrow = 0, ncol = 40)
+  for(i in unique(sesh_df$session_num)){
+    sesh = sesh_df %>% filter(session_num == i)
+    len = length(sesh$contrast_left)
+    for(i.trial in sesh$trial_n){
+      condensed_trials = rbind(condensed_trials, colMeans(session[[i]]$spks[[i.trial]]) )
+    }
+  }
+  return(as.data.frame(condensed_trials))
+}
+```
+
+```{r}
+success_right = sessions_more %>% filter(feedback == 1, turn_expectation == "right") %>% condense_trials()
+success_left = sessions_more %>% filter(feedback == 1, turn_expectation == "left") %>% condense_trials()
+success_still = sessions_more %>% filter(feedback == 1, turn_expectation == "still") %>% condense_trials()
+success_random = sessions_more %>% filter(feedback == 1, turn_expectation == "random") %>% condense_trials()
+
+fail_right = sessions_more %>% filter(feedback == -1, turn_expectation == "right") %>% condense_trials()
+fail_left = sessions_more %>% filter(feedback == -1, turn_expectation == "left") %>% condense_trials()
+fail_still = sessions_more %>% filter(feedback == -1, turn_expectation == "still") %>% condense_trials()
+fail_random = sessions_more %>% filter(feedback == -1, turn_expectation == "random") %>% condense_trials()
+
+success_right$feedback = 1
+success_left$feedback = 1
+success_still$feedback = 1
+success_random$feedback = 1
+
+fail_right$feedback = -1
+fail_left$feedback = -1
+fail_still$feedback = -1
+fail_random$feedback = -1
+
+combined_condensed_turns <- bind_rows(success_right, success_left, success_still, success_random, fail_right, fail_left, fail_still, fail_random)
+
+```
+
+```{r, fig.align='center'}
+turn_exp = sessions_more %>% dplyr::select(turn_expectation, feedback) %>% table()
+ggplot(data =as.data.frame(turn_exp), aes(x = turn_expectation, y = Freq, fill = feedback) ) + geom_col()+
+  geom_text(aes(label = Freq),  size = 3,position = position_stack(0.4)) +
+  labs(title = "Success and Failures Among Each Type of Turn Expectation", y = "", fill = "Feedback Type") + 
+  scale_x_discrete(limits = c("left","right","still", "random"), labels = c("Left","Right","Still", "Random"), name = "Expected Correct Turn") 
+```
+
+<center>
+
+**Figure 2.18: Stacked barchart of successes and failures among each type of turn expectation.**
+
+</center>
+
+```{r}
+kable(turn_exp %>% prop.table(margin = 1), format = "html",) %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.19: Proportion table displaying the success rates for each type of turn.**
+
+</center>
+
+The correct type of turn is determined by the right and left contrasts. When right contrast exceeds left contrast, a left turn is expected. When left contrast exceeds right contrast, a right turn is expected. When the contrasts are both 0, the wheel is expected to be still. When the contrasts are equal and non-zero, the turn expectation is random. The chart demonstrates that the right turn is the most common turn expectation with a total of 1762 trials. The left turn is the second most common type of turn, being expected in 1633 trials. The turn expectation is still for 1371 trials. The random turn expectation is the least common, being expected in 315 trials. The right turn has the highest success rate of 75.5%. The left turn has a similar success rate of 74.5%. The success rate when the wheel is supposed to be still is 65.7% and and success rate for randome wheel turns is 50.5%.
+
+```{r}
+cori_turn = sessions_more %>% filter(mouse_name == "Cori") %>% dplyr::select(turn_expectation, feedback) %>% table() 
+forssmann_turn = sessions_more %>% filter(mouse_name == "Forssmann") %>% dplyr::select(turn_expectation, feedback) %>% table()  
+hench_turn = sessions_more %>% filter(mouse_name == "Hench") %>% dplyr::select(turn_expectation, feedback) %>% table()
+lederberg_turn = sessions_more %>% filter(mouse_name == "Lederberg") %>% dplyr::select(turn_expectation, feedback) %>% table()
+```
+
+```{r, fig.align='center'}
+ggplot(data =as.data.frame(cori_turn), aes(x = turn_expectation, y = Freq, fill = feedback) ) + geom_col()+
+  geom_text(aes(label = Freq),  size = 3,position = position_stack(0.4)) +
+  labs(title = "Success and Failures Among Each Type of Turn Expectation for Mouse Cori", y = "", fill = "Feedback Type") + 
+  scale_x_discrete(limits = c("left","right","still", "random"), labels = c("Left","Right","Still", "Random"), name = "Expected Correct Turn") 
+```
+
+<center>
+
+**Figure 2.20: Stacked barchart of successes and failures depending on turn expectation for mouse Cori.**
+
+</center>
+
+```{r}
+kable(cori_turn %>% prop.table(margin = 1), format = "html",digits = 4) %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.21: Proportion table for successes and failures depending on turn expectation for mouse Cori.**
+
+</center>
+
+The left turn expectation is the most common correct turn expectation and the still, right, random turn expectations are the following most frequent turn expectations in that order. The random turn has the lowest success rate at 46.9% and the right expectation success rate is the highest at 74.8%. The right expectation rate is significantly higher than the left expectation success rate which is 58.3%. The success rate for the still wheel expectation is 66.2%, similar to the one of the general dataset.
+
+```{r, fig.align='center'}
+ggplot(data =as.data.frame(forssmann_turn), aes(x = turn_expectation, y = Freq, fill = feedback) ) + geom_col()+
+  geom_text(aes(label = Freq),  size = 3,position = position_stack(0.4)) +
+  labs(title = "Success and Failures Among Each Type of Turn Expectation for Mouse Forssmann", y = "", fill = "Feedback Type") + 
+  scale_x_discrete(limits = c("left","right","still", "random"), labels = c("Left","Right","Still", "Random"), name = "Expected Correct Turn") 
+```
+
+<center>
+
+**Figure 2.22: Stacked barchart of successes and failures depending on turn expectation for mouse Forssmann**
+
+</center>
+
+```{r}
+kable(forssmann_turn %>% prop.table(margin = 1), format = "html",digits = 4) %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.23: Proportion table for successes and failures depending on turn expectation for mouse Forssmann***
+
+</center>
+
+The types of turn expectation in order of frequency are left, right, still, and random. The highest success rate is 77.4% for the left turn and the lowest success rate is 53.3% for the random expectation turn. The left success rate is significantly higher than the right success turn at 59.5%. The still expectation rate is approximately 73%, also significantly higher than the right success rate and higher than the one for the general dataset.
+
+```{r}
+ggplot(data =as.data.frame(hench_turn), aes(x = turn_expectation, y = Freq, fill = feedback) ) + geom_col()+
+  geom_text(aes(label = Freq),  size = 3,position = position_stack(0.4)) +
+  labs(title = "Success and Failures Among Each Type of Turn Expectation for Mouse Hench", y = "", fill = "Feedback Type") + 
+  scale_x_discrete(limits = c("left","right","still", "random"), labels = c("Left","Right","Still", "Random"), name = "Expected Correct Turn") 
+```
+
+<center>
+
+**Figure 2.24: Stacked barchart of successes and failures depending on turn expectation for mouse Hench**
+
+</center>
+
+```{r}
+kable(hench_turn %>% prop.table(margin = 1), format = "html",digits = 4) %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.25: Proportion table for successes and failures depending on turn expectation for mouse Hench.**
+
+</center>
+
+Above are the stacked barchart of successes and failures depending on turn expectation for mouse Hench and the associated proportion table. The ranking of turn expectation in frequency from highest to lowest are right, left, still, and random. The highest success rate if 73.2% for the right turn and the lowest is 40.4% for the random turn. The left turn success rate is significantly lower at 65.3% than the right turn success rate. The still expectation success rate is 72.1%, which is very similar to of that for mouse Forssmann and is considerably higher than the left success rate.
+
+```{r, fig.align='center'}
+ggplot(data =as.data.frame(lederberg_turn), aes(x = turn_expectation, y = Freq, fill = feedback) ) + geom_col()+
+  geom_text(aes(label = Freq),  size = 3,position = position_stack(0.4)) +
+  labs(title = "Success and Failures Among Each Type of Turn Expectation for Mouse Lederberg", y = "", fill = "Feedback Type") + 
+  scale_x_discrete(limits = c("left","right","still", "random"), labels = c("Left","Right","Still", "Random"), name = "Expected Correct Turn") 
+```
+
+<center>
+
+**Figure 2.26: Stacked barchart of successes and failures depending on turn expectation for mouse Lederberg**
+
+</center>
+
+```{r}
+kable(lederberg_turn %>% prop.table(margin = 1), format = "html",digits = 4) %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.27: Proportion table for successes and failures depending on turn expectation for mouse Hench.**
+
+</center>
+
+The ranking of turn expectation in frequency from highest to lowest are right, left, still, and random. The highest success rate is 85.3% for the right turn expectation and the lowest success rate is 58.4% for the still wheel expectation. The left turn success rate is similar to the right turn success rate at 84.6%. The success rate is 59.8% for the random turn expectation.
+
+In conclusion, for mice Hench and Cori, performance was considerably better when a right turn was expected compared to when a left turn was. Mouse Forssman performed considerably better for when a left turn was expected versus when a right turn was. Mouse Lederberg is the only mouse who performed fairly equally on both left and right turn expectations, doing so with high success rates. The frequency of certain turn expectations do not appear to have an effect on the success rates. The success rates for random expectation were consistently low which is expected because the correct turn is randomly selected. The still wheel expectation was the 2nd highest success rate for each mouse except for Mouse Lederberg, where its success rate was considerably lower compared to other mice. Overall, it is highly suggested that the turn expectation has a relationship with the feedback type, with the specific relationship varying depending on the mouse.
+
+Knowing that the turn expectation may be an important feature, the exact contrast between the left and right will be examined. Contrast difference will be calculated by subtracting the right contrast from the left. Therefore, a negative contrast difference will indicate an expected left turn and a positive difference will indicate an expect right turn. A difference of 0 indicates either a random turn or the expectation of a wheel to be still.
+
+```{r}
+
+diff_table = sessions_more %>% dplyr::select(contrast_diff, feedback) %>% table() %>% prop.table(1)
+diff_mouse_table = sessions_more %>% dplyr::select(contrast_diff, mouse_name) %>% table() %>% prop.table(2)
+kable(list(diff_table, diff_mouse_table),digits = 4, format = "html",
+      table.attr = "class='table table-striped'") %>% kable_styling()
+```
+
+<center>
+
+**Figure 2.28: Proportion tables of contrast difference and feedback type, and of contrast difference and mouse.**
+
+</center>
+
+It's observed that among the failures and successes, there is a lower success rate of 62.87% for when the the contrast is not 0. This further supports the previous findings which indicated that among all sessions, mice had higher success rates for turning the wheel compared to keeping it still or randomly choosing. It is also noted that the absolute value of 0.25 for contrast different has a lower success rate at 68.9% and 64.35% for left and right turns, respectively. The success rates for when the absolute value of the contrast difference is 0.5 or above are all above 70%.
+
+Each mouse appears to have a different distribution of contrast differences. A contrast difference of 0 appears to be the most popular contrast difference, but the most popular non-zero contrast difference varies for each mouse. Cori's most popular difference is -1 at 14.33%, Forssmann's is 0.25 at 10.05%, Hench's is 1 at 13.96%, and Lederberg's is 0.5 at 10.87%. In order to investigate whether contrast difference may have a relationship with the differing success rates for each mouse, a 2-way anova test will be performed.
+
+```{r}
+summary(aov(feedback ~ contrast_diff + mouse_name + mouse_name:contrast_diff, data = sessions_more))
+```
+<center>
+
+**Figure 2.29: 2-way anova test results of feedback according to contrast difference and mouse name.**
+
+</center>
+
+A two-way anova test is performed to evaluate the relationship between mouse type and contrast difference when it comes to whether a mouse succeeds or fails. From the results, it's shown that the p-value for mouse name and contrast difference are both significant since both are under 0.1. However, mouse name is much more significant since its p-value is so low. Additional, the interaction term between mouse name and contrast difference is very low, which indicates that the relationship between mouse and contrast difference varies depending on the type of mouse and that the interaction is statistically significant. In conclusion, both contrast difference and mouse name and the relationship between them are suggested to have an correlation with the feedback type.
+
+Pivoting from the turn expectation, the average and total number of spikes will be investigated to determine whether they behave different among sessions and trials.
+
+```{r, fig.align='center'}
+
+
+mouse.v.spikes = ggplot(sessions_factorized, aes(x=mouse_name, y=n_spikes, color=feedback)) + geom_violin() + labs(x = "Mouse", y = "Number of Spikes ")
+
+mouse.v.avgspikes = ggplot(sessions_factorized, aes(x=mouse_name, y=avg_spikes_per_neuron, color=feedback)) + geom_violin() + 
+  labs(x = "Mouse", y = "Average Number of Spikes per Neuron")
+
+
+mouse.v.spikes / mouse.v.avgspikes
+```
+
+<center>
+
+**Figure 2.30: Violin plots for the number of spikes and average number of spikes per neuron for each trial, sorted based on mouse was performing and feedback type.**
+
+</center>
+
+For both plots, the distributions for success and failure are relatively similar. However, among most of the plots, it is recognized that the point distribution for failures are more concentrated. This is seen when the plots' widest points when feedback = -1 are wider than the widest points when feedback = 1. This indicates that the number of spikes or average number of spikes are a more telling variable for failures than successes. It is also observed that all of the plots for average number of spikes have a wider distribution when the feedback = 1. This indicates that successes have a more diverse range of average number of spikes. For the plots depicting number of spikes, the ranges only end higher when the feedback = 1. Therefore, the number of spikes may be more reliable than average number of spikes when estimating successful turns. When it comes to differences among the plots, the plots for average number of spikes are more heterogeneous according to feedback type than the ones for number of spikes, indicating that average number of spikes could be a more telling feature for determining feedback type. In conclusion, there are slightly differences between plots which further indicate different behaviors among mice and imply a relationship between feedback type and both the number of spikes and the average number of spikes.
+
+```{r}
+# average spike area function
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+  }
+# function to create trial summary
+create.trial = function(i.sesh){
+  n.trial=length(session[[i.sesh]]$feedback_type) # number of trials
+  n.area=length(unique(session[[i.sesh]]$brain_area )) # number of areas 
+  trial_summary =matrix(nrow=n.trial,ncol= n.area+1+2+1) # creating matrix
+  for(i.trial in 1:n.trial){
+    trial_summary[i.trial,]=c(average_spike_area(i.trial,this_session = session[[i.sesh]]), 
+                        session[[i.sesh]]$feedback_type[i.trial],
+                        session[[i.sesh]]$contrast_left[i.trial],
+                        session[[i.sesh]]$contrast_right[i.sesh],
+                        i.trial)
+  }
+  colnames(trial_summary)=c(names(average_spike_area(i.trial,this_session = session[[i.sesh]])), 'feedback', 'left contr.','right contr.','id' )
+  return(as_tibble(trial_summary))
+}
+
+plot.trial<-function(i.trial, i.sesh, trial.summary){
+  this_session = session[[i.sesh]]
+  varname=names(trial.summary)
+  area=varname[1:(length(varname)-4)]
+  area.col=rainbow(n=length(area),alpha=0.7)
+  spks=this_session$spks[[i.trial]]
+  n.neuron=dim(spks)[1]
+  time.points=this_session$time[[i.trial]]
+    
+  plot(0,0,xlim=c(min(time.points),max(time.points)),ylim=c(0,n.neuron+1),col='white', xlab='Time (s)',yaxt='n', ylab='Neuron', main=paste("Session ", i.sesh,', Trial ',i.trial, ' (feedback = ',
+          this_session$feedback_type[i.trial], ")", sep = ""),cex.lab=1.5)
+  for(i in 1:n.neuron){
+      i.a=which(area== this_session$brain_area[i])
+      col.this=area.col[i.a]
+      ids.spike=which(spks[i,]>0) # find out when there are spikes 
+      if( length(ids.spike)>0 ){
+          points(x=time.points[ids.spike],y=rep(i, length(ids.spike) ),pch = ".",cex=2, col=col.this)
+      }
+      
+            
+    }
+    
+legend("topright", 
+  legend = area, 
+  col = area.col, 
+  pch = 16, 
+  cex = 0.8
+  )
+}
+
+sesh1_trial = create.trial(1)
+sesh2_trial = create.trial(2)
+sesh3_trial = create.trial(3)
+sesh4_trial = create.trial(4)
+sesh5_trial = create.trial(5)
+sesh6_trial = create.trial(6)
+sesh7_trial = create.trial(7)
+sesh8_trial = create.trial(8)
+sesh9_trial = create.trial(9)
+sesh10_trial = create.trial(10)
+sesh11_trial = create.trial(11)
+sesh12_trial = create.trial(12)
+sesh13_trial = create.trial(13)
+sesh14_trial = create.trial(14)
+sesh15_trial = create.trial(15)
+sesh16_trial = create.trial(16)
+sesh17_trial = create.trial(17)
+sesh18_trial = create.trial(18)
+
+
+```
+
+```{r}
+# function which graphs average number of spikes from each area across trials of each session
+area_avg = function(i.sesh, trial.summary, xtra = ""){
+  n.trial=length(session[[i.sesh]]$feedback_type)
+  n.area=length(unique(session[[i.sesh]]$brain_area ))
+  area.col=rainbow(n=n.area,alpha=0.7)
+  ymin = min(subset(trial.summary, select = -c(feedback, `left contr.`, `right contr.`, id))) # defines y-min
+  ymax = max(subset(trial.summary, select = -c(feedback, `left contr.`, `right contr.`, id))) # defines y-max 
+  plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(ymin,ymax), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.sesh, xtra)) # plot blank canvas
+  for(i in 1:n.area){ # for each area, graph average spike pattern
+    lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1)
+    lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+  }
+  
+  legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8)
+  
+}
+```
+
+It is evident that the activity of neurons from certain brain areas vary greatly over trials among each session. Different brain areas such as MRN have higher average spike counts than areas such as SCs in Session 14. Certain areas have relatively constant average spikes over time such as VISpm in Session 2 while area root in the same session appears to drop around 30 trials and stay relatively constant around 60 trials.
+
+```{r, fig.align='center'}
+area_avg(1, filter(sesh1_trial, feedback==1), xtra = "(Feedback = 1)") 
+area_avg(1, filter(sesh1_trial, feedback==-1), xtra = "(Feedback = -1)")
+```
+
+<center>
+
+**Figure 2.31: Graphs of the average spikes counts of each brain area in session 1, containing mouse Cori's performance, for successes (feedback = 1) and failures (feedback = -1).**
+
+</center>
+
+Looking at the graphs, the lines are more smooth for the success graph, but this is likely attributed to there being a higher sample size for successes than failures. Overall, it's observed that the behavior among the averaged spike counts per brain area really does not vary much according to each different feedback type.
+
+```{r}
+area_avg(17, filter(sesh17_trial, feedback==1), xtra = "(Feedback = 1)") 
+area_avg(17, filter(sesh17_trial, feedback==-1), xtra = "(Feedback = -1)")
+```
+
+<center>
+
+**Figure 2.32: Graphs for the average spike counts for the brain areas in session 17, for mouse Lederberg, divided into successes and failures.**
+
+</center>
+
+Looking at the same graphs for mouse Lederberg, some slight differences between the behaviors for different feedback types are observed. For example, the general trend line for LD appears to decrease slightly over time when feedback = 1 and slightly increases over time when feedback = -1. However, the behaviors for each brain area are still similar to each other despite different feedback. The LD brain area even has the same spikes around 200 trials in both graphs. It can be concluded from the graphs on the two randomly chosen sessions from the performances of difference mice that the average spike counts of the brain areas may be homogenous across trials. Therefore, it may not be a telling predictor of the feedback type.
+
+```{r, fig.align='center'}
+plot.trial(1, 1, sesh1_trial)
+
+plot.trial(114, 1, sesh1_trial)
+```
+
+<center>
+
+**Figure 2.33: Graphs of the neural activity of different brain areas in trial 114 of session 1 for both a successful and non-successful trial.**
+
+</center>
+
+Taking the first and last trials of session 1, we can see the neural patterns which led to a successful and an unsuccessful turn. It is observed that order of the distribution definitely varies more than the behavior of the average spikes of brain areas because of the different scattering of the points from different brain areas. 
+
+```{r}
+total_trials = 0
+
+for (i in 1:18){
+  total_trials = total_trials + length(session[[i]]$feedback_type)
+}
+
+averaged_bins = tibble(
+  turn_exp = rep("turn", total_trials), 
+  !!!setNames(rep(list(0), 40), paste0(1:40)),
+  feedback = rep(0, total_trials),
+)
+index = 0 
+for (i in 1:18){
+  sesh = session[[i]]
+  n_trials = length(sesh$feedback_type)
+  for (n in 1:n_trials){
+    index = index + 1
+    left = sesh$contrast_left[n]
+    right = sesh$contrast_right[n]
+    averaged_bins[index, "turn_exp"] =  ifelse(left > right, "right", ifelse(right > left, "left", ifelse(right == left & right ==0, "still", "random")))
+    summed_spikes= as.list(apply(sesh$spks[[n]], 2, mean))
+    averaged_bins[index, paste0(1:40)] = summed_spikes
+    averaged_bins[index, "feedback"] = sesh$feedback_type[n]
+  }
+}
+
+
+
+```
+
+
+```{r}
+left_success = averaged_bins %>% filter(turn_exp == "left", feedback == 1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+left_fail = averaged_bins %>% filter(turn_exp == "left", feedback == -1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+
+right_success = averaged_bins %>% filter(turn_exp == "right", feedback == 1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+right_fail = averaged_bins %>% filter(turn_exp == "right", feedback == -1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+
+still_success = averaged_bins %>% filter(turn_exp == "still", feedback == 1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+still_fail = averaged_bins %>% filter(turn_exp == "still", feedback == -1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+
+random_success = averaged_bins %>% filter(turn_exp == "random", feedback == 1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+random_fail = averaged_bins %>% filter(turn_exp == "random", feedback == -1) %>% dplyr::select(-c(turn_exp, feedback)) %>% colMeans()
+```
+
+```{r}
+averaged_turns = tibble(
+  time_bin = 1:40,
+  left_success = left_success, 
+  left_fail = left_fail,
+  right_success = right_success,
+  right_fail = right_fail, 
+  still_success = still_success,
+  still_fail = still_fail, 
+  random_success = random_success ,
+  random_fail = random_fail,
+)
+```
+
+```{r, message=FALSE}
+
+
+ggplot(averaged_turns, aes(x = time_bin)) + geom_smooth(aes(y = left_success - left_fail), color = "red") + 
+  geom_smooth(aes(y = right_success - right_fail), color = "blue") +
+  geom_smooth(aes(y = random_success - random_fail), color = "purple") + 
+  geom_smooth(aes(y = still_success - still_fail), color = "green")+ theme_minimal() + labs(x = "Time Bins", 
+        y = "Difference Between Avg. Timebins", title = "Difference between Average Timebins for each Turn Expectation") + 
+   geom_text(aes(x = 10, y = 0.005, label = "Left Turn"), color = "blue") + geom_text(aes(x = 30, y = 0.007, label = "Right Turn"), color = "red") +
+  geom_text(aes(x = 25, y = 0.002, label = "Random Turn"), color = "purple") + geom_text(aes(x = 20, y = -0.002, label = "No Turn"), color = "green")
+
+```
+
+<center>
+**Figure 2.34: Line Graph of Difference between the Averaged Timebins for successes and failures among trials with Left, Right, Still, and Random Turn Expectations.**
+</center>    
+
+Looking at the differences between the averaged timebins of successes and failures according to different turn expectations, it is observed that the left and right turn have similar neural patterns while random turn and still turn have different ones. This indicates that the neural behavior for left and right turns may be similar. This could also indicate that 3 models may be needed for building a final prediction model because the neural patterns differ.   
+
+
+### Section 3: Data Integration
+
+To integrate all the data into one dataset, several factors were considered to best consolidate the data. Several variables were removed and added in this process. Basic and essential information such as the mouse name, session number, trial number, and feedback type were kept. The number of brain areas was not included because it did not appear to have a correlation with the success rate, and was unique to each session. The date was not kept because it was unique to each session and the session number is already logged.       
+
+While contrast difference proved to be a statistically significant feature, it was not included in data integration because it would be perfectly collinear with left and right contrast, which were prioritized over the difference because they provided more detail. The turn expectation variable was added which is a categorical variable keeping track of the correct expected turn for each trial. The brain origins of the 3 most active neurons for each trial were not included in this integration because while they proved to be heterogeneous across sessions and trials, there were several regions that only occurred a few times. This would cause major issues in model prediction due to unseen levels and variables. However, the associated average spikes for each neuron are included because it proved to be statistically significant to the feedback type in the 2-way anova test and is easier for models to work with.        
+
+Knowing that the individual neural activity for each trial was heterogeneous, the firing rates of neurons are an important feature to incorporate in the dataset. However, due to the inconsistent dimensions for each trial and the sheer scale, the matrices in the spks list have been averaged to the average number of spikes per time bin, resulting in 40 variables since there is a column for the average of each of the 40 time bins in a trial. Because the average number of spikes did not appear to be very heterogeneous across sessions, it was not kept. Additionally, it would have been collinear with the averaged time bins, providing further reason to leave it out. Additionally, mouse name and turn expectation were one hot encoded so that models such as ridge regression could be used. 
+
+
+```{r}
+diff_areas = unique(area_count)[, 1]
+avg_area_integration<-function(i.t,this_session){
+  averages_all_areas = list()
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  for (area in diff_areas){
+    if (is.na(spk.average.tapply[area])){
+      averages_all_areas = append(averages_all_areas, 0)
+    }
+    else {
+      averages_all_areas = append(averages_all_areas, spk.average.tapply[area][[1]])
+    }
+  }
+  return(averages_all_areas)
+}
+```
+
+```{r}
+# Data Integration Function
+# Merges and preprocesses data 
+
+# Need average spikes per area, average spikes, average spikes per neuron, contrast, categorical expectations, start time just in case, session and trial number along with mouse name, 
+
+# leaving out: average spikes per area, mouse name, start time, 
+
+
+
+create_df = function(total_trials){
+  df = tibble(
+    mouse = rep("name", total_trials),
+    session_num = rep(0, total_trials), # session number
+    trial_n = rep(0, total_trials), # trial number
+    contrast_left = rep(0, total_trials), 
+    contrast_right = rep(0, total_trials), 
+    turn_exp = rep("turn", total_trials),
+    feedback = rep(0, total_trials),  
+    n_spikes = rep(0, total_trials), 
+    n_neurons = rep(0, total_trials),
+    avg_spike_area1 = rep(0, total_trials),
+    avg_spike_area2 = rep(0, total_trials),
+    avg_spike_area3 = rep(0, total_trials),
+    !!!setNames(rep(list(0), 40), paste0("TB", 1:40)),
+    
+    )
+  return(df)
+}
+
+frame = create_df(total_trials)
+```
+
+```{r}
+data_integration = function(df){
+  index = 0
+  for(i in 1:18){
+    sesh = session[[i]]
+    n_trials = length(sesh$feedback_type) # number of trials
+    for(n in 1:n_trials){
+      index = index + 1
+      spks = sesh$spks[[n]]
+      df[index, "mouse"] = sesh$mouse_name 
+      df[index, "session_num"] = i
+      df[index, "trial_n"] = n
+      left = sesh$contrast_left[n]
+      right = sesh$contrast_right[n]
+      df[index, "contrast_left"] = left
+      df[index, "contrast_right"] = right
+      df[index, "turn_exp"] = ifelse(left > right, "right", ifelse(right > left, "left", ifelse(right == left & right ==0, "still", "random")))
+      df[index, "feedback"] = ifelse(sesh$feedback_type[n] == -1, 0, 1)
+      df[index, "n_spikes"] = sum(apply(spks, 1, sum))
+      df[index, "n_neurons"] = dim(sesh$spks[[n]])[1]
+      neuron_sums = spks %>% rowSums() # get spikes sums of each neuron 
+      area_indices = neuron_sums %>% order(decreasing = TRUE) # indices of top neurons
+      df[index, "avg_spike_area1"] = neuron_sums[area_indices[1]] / 40 
+      df[index, "avg_spike_area2"] = neuron_sums[area_indices[2]] / 40 
+      df[index, "avg_spike_area3"] = neuron_sums[area_indices[3]] / 40 
+      summed_spikes= as.list(apply(spks, 2, mean))
+      df[index, paste0("TB", 1:40)] = summed_spikes
+
+  }
+  }
+  return(df)
+}
+
+integrated_data = data_integration(frame)
+```
+
+```{r}
+dum = dummyVars(" ~ .", data = dplyr::select(integrated_data, c(mouse, turn_exp)))
+dummy_df = as.data.frame(predict(dum, newdata = dplyr::select(integrated_data, c(mouse, turn_exp))))
+integrated_dummy = bind_cols(integrated_data, dummy_df) %>% dplyr::select(-c(mouse, turn_exp))
+
+```
+
+```{r}
+kable(head(integrated_dummy, 10))
+```
+
+<center>
+**Figure 3.1: First 10 rows of the integrated data set used for model building.**
+</center>  
+
+### Section 4: Predictive Modeling
+
+To build a prediction model to predict the feedback type, 3 datasets are created and split into test and training datasets to ultimately select 3 models for prediction. As noted in EDA, the difference between the averaged time bins had different patterns according to type of correct turn expectation. While it was also noted that the behavior of mice varied, separate models were not created for each mouse to preserve sample size and because the mouse name is still a recorded variable. The left and right turn expectations had similar patterns while the random turn and still expectations were different. Therefore, 3 models will be selected for predicting the feedback type of trials where a left or right turn is expected, when the wheel is expected to be still, and for random turn expectations. For the left/right dataset, all of the variables in the integrated data set are kept. For the still wheel dataset, the turn expectation was removed because it was homogeneous, and the left and right contrasts were removed because they both are constantly 0. For the random turn dataset, turn expectation is removed because it is always "random" and the right contrast was removed because the left and right contrast are equal, so only one is needed. 80% of each dataset is kept for training and the remaining 20% is kept for testing.
+
+```{r}
+# splitting data into test and train
+set.seed(40)
+left_right = integrated_dummy %>% filter(turn_expleft == 1| turn_expright == 1) %>% dplyr::select(-c(turn_expstill, turn_exprandom, turn_expleft, mouseCori))
+still = integrated_dummy %>% filter(turn_expstill == 1) %>% dplyr::select(-c(turn_expstill, turn_expleft, turn_expright, turn_exprandom, contrast_left, contrast_right, mouseCori))
+random = integrated_dummy %>% filter(turn_exprandom == 1) %>% dplyr::select(-c(contrast_right, turn_expleft, turn_expright, turn_expstill, turn_exprandom, mouseCori))
+
+
+indices_lr = createDataPartition(left_right$feedback, p = 0.8, list = FALSE)
+train_lr = left_right[indices_lr, ]
+test_lr = left_right[-indices_lr, ]
+
+indices_still = createDataPartition(still$feedback, p = 0.8, list = FALSE)
+train_still = still[indices_still, ]
+test_still = still[-indices_still, ]
+
+indices_random = createDataPartition(random$feedback, p = 0.8, list = FALSE)
+train_random = random[indices_random, ]
+test_random = random[-indices_random, ]
+```
+
+```{r}
+
+log_lr_v1 = glm(feedback ~., data = train_lr, family = "binomial")
+log_lr_v1_train_pred = round((predict(log_lr_v1, type = "response")))
+log_lr_train_acc = mean(log_lr_v1_train_pred == train_lr$feedback) # training accuracy 
+
+
+log_lr_v1_test_pred <- round(predict(log_lr_v1, test_lr %>% dplyr::select(-c(feedback)), type = 'response'))
+log_lr_test_acc = mean(log_lr_v1_test_pred== test_lr$feedback)
+```
+
+```{r}
+log_still_v1 = glm(feedback ~., data = train_still, family = "binomial")
+log_still_v1_train_pred = round(predict(log_still_v1, type = "response"))
+log_still_train_acc = mean(log_still_v1_train_pred == train_still$feedback) # training accuracy 
+
+
+log_still_v1_test_pred <- round(predict(log_still_v1, test_still %>% dplyr::select(-c(feedback)), type = 'response'))
+log_still_test_acc = mean(log_still_v1_test_pred== test_still$feedback)
+```
+
+```{r, warning = FALSE}
+log_random_v1 = glm(feedback ~., data = train_random, family = "binomial")
+log_random_v1_train_pred = round(predict(log_random_v1, type = "response"))
+log_random_train_acc = mean(log_random_v1_train_pred == train_random$feedback) # training accuracy
+
+log_random_v1_test_pred = round(predict(log_random_v1, test_random, type = "response"))
+log_random_test_acc = mean(log_random_v1_test_pred== test_random$feedback) # test accuracy
+```
+
+A simple logistic regression model is fit on each dataset. For the left/right dataset, the training accuracy is 78.13% and the testing accuracy is 77.9%. The test accuracy is approximately 2% higher than the overall success rate for left and right turns, 75.03%. The log regression model for the still dataset did not perform as well. The training accuracy is 68.64% but the testing accuracy is 61.31%, which is lower than 65.72%, the overall success rate for still wheel expectations. The random dataset logistic model overfit with a training accuracy os 70.63% and a testing accuracy of 49.21%, slightly lower than 50.48%, the overall success rate for random turn expectation. However, this is expected since the correct wheel turn is randomly chosen, so it is indicated that no variable can properly predict whether the mouse can turn the wheel successfully.
+
+Expanding on logistic regression, ridge regression models are tested due to the amount of collinear coefficients and to fight overfitting seen in the still and random turn expectations. For the left/right dataset, the train accuracy is 75.68% and the test accuracy is 76.92%, which is marginally better than the test accuracy for the logistic regression model for the left/right dataset. For the still wheel dataset, the training accuracy is 66.75% and the testing accuracy is 62.69%. This model overfit less and the testing accuracy is better than the one from the logistic regression model. However, the testing accuracy is still approximately 3% lower than the naive success rate for still wheel turns. For the random dataset, the training accuracy is 61% and the test accuracy is 50.95%. This model still overfits but not to a less extent than the one from simple logistic regression.
+
+```{r}
+ridge_lr = glmnet(dplyr::select(train_lr, -feedback), as.matrix(train_lr$feedback), family = "binomial", alpha = 0)
+
+ridge_lr_train_pred = predict(ridge_lr, dplyr::select(train_lr, -feedback) %>% as.matrix(), type = "response") 
+ridge_lr_train_predictions = ifelse(ridge_lr_train_pred > 0.5, 1, 0)
+ridge_lr_train_acc = mean(ridge_lr_train_predictions == train_lr$feedback)
+
+ridge_lr_test_pred = predict(ridge_lr, dplyr::select(test_lr, -feedback) %>% as.matrix(), type = "response") 
+ridge_lr_test_predictions = ifelse(ridge_lr_test_pred > 0.5, 1, 0)
+ridge_lr_test_acc = mean(ridge_lr_test_predictions == test_lr$feedback)
+```
+
+```{r}
+ridge_still = glmnet(dplyr::select(train_still, -feedback), as.matrix(train_still$feedback), family = "binomial", alpha = 0)
+
+ridge_still_train_pred = predict(ridge_still, dplyr::select(train_still, -feedback) %>% as.matrix(), type = "response") 
+ridge_still_train_predictions = ifelse(ridge_still_train_pred > 0.5, 1, 0)
+ridge_still_train_acc = mean(ridge_still_train_predictions == train_still$feedback)
+
+ridge_still_test_pred = predict(ridge_still, dplyr::select(test_still, -feedback) %>% as.matrix(), type = "response") 
+ridge_lr_test_predictions = ifelse(ridge_still_test_pred > 0.5, 1, 0)
+ridge_still_test_acc = mean(ridge_lr_test_predictions == test_still$feedback)
+```
+
+```{r}
+ridge_random = glmnet(dplyr::select(train_random, -feedback), as.matrix(train_random$feedback), family = "binomial", alpha = 0)
+
+ridge_random_train_pred = predict(ridge_random, dplyr::select(train_random, -feedback) %>% as.matrix(), type = "response") 
+ridge_random_train_predictions= ifelse(ridge_random_train_pred > 0.5, 1, 0)
+ridge_random_train_acc = mean(ridge_random_train_predictions == train_random$feedback)
+
+ridge_random_test_pred = predict(ridge_random, dplyr::select(test_random, -feedback) %>% as.matrix(), type = "response") 
+ridge_random_test_predictions= ifelse(ridge_random_test_pred > 0.5, 1, 0)
+ridge_random_test_acc = mean(ridge_random_test_predictions == test_random$feedback)
+```
+
+Moving forward, random forest models prove to have higher accuracies but also tend to overfit all the data sets. All of the training accuracies were 100%. The left/right model test accuracy is 78.65%, the still wheel model test accuracy is 63.87%, and the random turn model test accuracy is 49.20% All of these training accuracies are higher than the previous models, even on the random turn model. While the still wheel model test accuracy is still slightly below the success rate, it is getting closer. To address overfitting and optimize accuracy, 10-fold cross validation is performed in combination with the random forest classifier to fine tune the hyper parameters. The test accuracy of the left/right model increased to 80.85%, but the test accuracy of both the still dataset and random dataset decreased to 62.77% and 55.56%, respectively. It is noted that the test accuracy of the still dataset dipped below the general success rate for still wheel turn expectations. Because the random forests models performed the best on both the left/right and still datasets, the final models will either be selected from the base random forest models or the cross validation ones with the except of the model for the random dataset. The final model for the random turn dataset will be the ridge regression model because it overfit the least. 
+
+```{r}
+set.seed(40)
+train_lr$feedback = factor(train_lr$feedback, levels = c(0, 1))
+rf_lr = randomForest(feedback~., data=train_lr, mtry = 4, ntree = 100)
+rf_lr_train = predict(rf_lr, newdata = train_lr %>% dplyr::select(-feedback))
+rf_lr.train.acc = mean(rf_lr_train == train_lr$feedback)
+
+rf_lr.test = predict(rf_lr, newdata = test_lr %>% dplyr::select(-feedback))
+rf_lr.test.acc = mean(rf_lr.test == test_lr$feedback)
+```
+
+```{r}
+set.seed(50)
+train_still$feedback = factor(train_still$feedback, levels = c(0, 1))
+rf_still = randomForest(feedback~., data=train_still, mtry = 4, ntree = 150)
+
+rf_still.train = predict(rf_still, newdata = train_still %>% dplyr::select(-feedback))
+rf_still.train.acc = mean(rf_still.train == train_still$feedback)
+
+rf_still.test = predict(rf_still, newdata = test_still %>% dplyr::select(-feedback))
+rf_still.test.acc = mean(rf_still.test == test_still$feedback)
+```
+
+```{r}
+set.seed(40)
+train_random$feedback = factor(train_random$feedback, levels = c(0, 1))
+rf_random = randomForest(feedback~., data=train_random, mtry = 3, ntree = 150)
+
+rf_random.train = predict(rf_random, newdata = train_random %>% dplyr::select(-feedback))
+rf_random.train.acc = mean(rf_random.train == train_random$feedback)
+
+rf_random.test = predict(rf_random, newdata = test_random %>% dplyr::select(-feedback))
+rf_random.test.acc = mean(rf_random.test == test_random$feedback)
+```
+
+```{r}
+set.seed(40)
+ctrl = trainControl(method = "cv",    # Cross-validation method
+                     number = 10,      # Number of folds
+                     verboseIter = FALSE) 
+
+rf.lr.cv = train(feedback ~ .,       
+               data = train_lr,   
+               method = "rf",        
+               trControl = ctrl) 
+
+rf.still.cv = train(feedback ~ .,       
+               data = train_still,   
+               method = "rf",        
+               trControl = ctrl) 
+```
+
+```{r}
+rf_lr.cv.test = predict(rf.lr.cv, newdata = test_lr %>% dplyr::select(-feedback))
+rf_lr.test.cv.acc = mean(rf_lr.cv.test == test_lr$feedback)
+
+rf_still.cv.test = predict(rf.still.cv, newdata = test_still %>% dplyr::select(-feedback))
+rf_still.cv.test.acc = mean(rf_still.cv.test == test_still$feedback)
+
+```
+
+```{r, fig.align= "center"}
+test_lr$feedback = factor(test_lr$feedback, levels = c(0, 1))
+cm1 <- confusionMatrix(factor(rf_lr.test), test_lr$feedback, dnn = c("Prediction", "Reference"))
+
+plt1 <- as.data.frame(cm1$table)
+
+plt1 = ggplot(plt1, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction" , title = "Confusion Matrix for Left/Right Random Forest Classifier") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+
+cm2 <- confusionMatrix(factor(rf_lr.cv.test), test_lr$feedback, dnn = c("Prediction", "Reference"))
+
+plt2 <- as.data.frame(cm2$table)
+
+plt2 = ggplot(plt2, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction", title = "Confusion Matrix for Left/Right 10-fold Random Forest Classifier") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1")) 
+
+plt1 / plt2
+```
+<center>
+**Figure 4.1: Confusion matrices for the base and 10-fold Random Forest models for the Left/Right Dataset**
+</center>       
+
+From the confusion matrices, it is observed that the 10-fold classifier misclassified successes more but also increased the accuracy for predicting failures. For the first random forest classifier, the majority of failures were classified as successes while the 10-fold classifier accurately predicts almost double the amount in the first one.   
+
+```{r, message = FALSE, fig.align='center'}
+#define object to plot and calculate AUC
+rocobj1 <- roc(test_lr$feedback, as.numeric(rf_lr.test))
+auc1<- round(auc(test_lr$feedback, as.numeric(rf_lr.test)),4)
+
+rocobj2 <- roc(test_lr$feedback, as.numeric(rf_lr.cv.test))
+auc2<- round(auc(test_lr$feedback, as.numeric(rf_lr.cv.test)),4)
+
+#create ROC plot
+roc1 = ggroc(rocobj1, colour = 'steelblue', size = 2) + 
+  ggtitle(paste0('ROC Curve for Base Random Forest (Left/Right) ', '(AUC = ', auc1, ')'))
+
+#create ROC plot
+roc2 = ggroc(rocobj2, colour = 'steelblue', size = 2) + 
+  ggtitle(paste0('ROC Curve 10-Fold Random Forest (Left/Right) ', '(AUC = ', auc2, ')'))
+
+roc1 / roc2
+```
+<center>
+**Figure 4.2: ROC Curves for the base and 10-fold Random Forest models for the Left/Right Dataset**
+</center>   
+The ROC curves confirm that the 10-fold classifier left/right model is better at distinguishing between the classes because the AUC is approximately 0.65 larger than the AUC of 0.6 for the base model. Therefore, the 10-fold classifier will be selected for predicting trials with a left or right turn as the expected correct turn. 
+
+
+```{r, fig.align= "center"}
+test_still$feedback = factor(test_still$feedback, levels = c(0, 1))
+cm1 <- confusionMatrix(factor(rf_still.test), test_still$feedback, dnn = c("Prediction", "Reference"))
+
+plt1 <- as.data.frame(cm1$table)
+
+plt1 = ggplot(plt1, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction" , title = "Confusion Matrix for the Still Random Forest Classifier") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+
+cm2 <- confusionMatrix(factor(rf_still.cv.test), test_still$feedback, dnn = c("Prediction", "Reference"))
+
+plt2 <- as.data.frame(cm2$table)
+
+plt2 = ggplot(plt2, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction", title = "Confusion Matrix for the Still 10-fold Random Forest Classifier") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1")) 
+
+plt1 / plt2
+```
+<center>
+**Figure 4.3: Confusion matrices for the base and 10-fold Random Forest models for the Still Dataset**
+</center>      
+The two models for the the still dataset perform very similarly. The 10-fold model correctly classifiers 2 more succeses than the base model, but majorly overclassifies the failure class as success due to the class imbalance. The base model has a higher accuracy for the failure class for a marginally lower accuracy in the success class, so the base model for the still dataset will be selected.   
+
+```{r, message = FALSE, fig.align='center'}
+#define object to plot and calculate AUC
+rocobj1 <- roc(test_still$feedback, as.numeric(rf_still.test))
+auc1<- round(auc(test_still$feedback, as.numeric(rf_still.test)),4)
+
+rocobj2 <- roc(test_still$feedback, as.numeric(rf_still.cv.test))
+auc2<- round(auc(test_still$feedback, as.numeric(rf_still.cv.test)),4)
+
+#create ROC plot
+roc1 = ggroc(rocobj1, colour = 'steelblue', size = 2) + 
+  ggtitle(paste0('ROC Curve for Base Random Forest (Still) ', '(AUC = ', auc1, ')'))
+
+#create ROC plot
+roc2 = ggroc(rocobj2, colour = 'steelblue', size = 2) + 
+  ggtitle(paste0('ROC Curve 10-Fold Random Forest (Still) ', '(AUC = ', auc2, ')'))
+
+roc1 / roc2
+```
+<center>
+**Figure 4.4: ROC Curves for the base and 10-fold Random Forest models for the Still Dataset**
+</center>   
+The ROC curves demonstrate that the base model for the still dataset has a higher AUC of 0.56 compared to the 10-fold model's AUC of 0.5. Therefore, the base model can better distinguish the classes and will be used as the final prediction model for predicting the feedback type of trials with a still wheel turn expectation as the correct response.   
+
+
+
+In conclusion, after testing logistic regression, ridge logistic regression, random forest classifiers, and 10-fold random forest classifiers, it was deduced that the 10-fold random forest classifiers performed the best on the left/right dataset while the base random forest model performed the best on the still dataset and was chosen for the random dataset   
+
+
+
+### Section 5: Prediction Performance on the Test Sets       
+
+```{r}
+test = list()
+for(i in 1:2){
+  test[[i]]=readRDS(paste('/Users/hannahwen/Desktop/STA141A/test/test',i,'.rds',sep=''))
+}
+test1 = test[[1]]
+test2 = test[[2]]
+```
+
+```{r}
+create_df = function(total_trials){
+  df = tibble(
+    mouse = rep("name", total_trials),
+    session_num = rep(0, total_trials), # session number
+    trial_n = rep(0, total_trials), # trial number
+    contrast_left = rep(0, total_trials), 
+    contrast_right = rep(0, total_trials), 
+    turn_exp = rep("turn", total_trials),
+    feedback = rep(0, total_trials),  
+    n_spikes = rep(0, total_trials), 
+    n_neurons = rep(0, total_trials),
+    avg_spike_area1 = rep(0, total_trials),
+    avg_spike_area2 = rep(0, total_trials),
+    avg_spike_area3 = rep(0, total_trials),
+    !!!setNames(rep(list(0), 40), paste0("TB", 1:40)),
+    
+    )
+  return(df)
+}
+
+test_frame = create_df(length(test1$contrast_left) + length(test2$contrast_left))
+```
+
+```{r}
+test_integration = function(df){
+  index = 0
+  for(i in 1:2){
+    sesh = test[[i]]
+    n_trials = length(sesh$feedback_type) # number of trials
+    for(n in 1:n_trials){
+      index = index + 1
+      spks = sesh$spks[[n]]
+      df[index, "mouse"] = sesh$mouse_name 
+      df[index, "session_num"] = i
+      df[index, "trial_n"] = n
+      left = sesh$contrast_left[n]
+      right = sesh$contrast_right[n]
+      df[index, "contrast_left"] = left
+      df[index, "contrast_right"] = right
+      df[index, "turn_exp"] = ifelse(left > right, "right", ifelse(right > left, "left", ifelse(right == left & right ==0, "still", "random")))
+      df[index, "feedback"] = ifelse(sesh$feedback_type[n] == -1, 0, 1)
+      df[index, "n_spikes"] = sum(apply(spks, 1, sum))
+      df[index, "n_neurons"] = dim(sesh$spks[[n]])[1]
+      neuron_sums = spks %>% rowSums() # get spikes sums of each neuron 
+      area_indices = neuron_sums %>% order(decreasing = TRUE) # indices of top neurons
+      df[index, "avg_spike_area1"] = neuron_sums[area_indices[1]] / 40 
+      df[index, "avg_spike_area2"] = neuron_sums[area_indices[2]] / 40 
+      df[index, "avg_spike_area3"] = neuron_sums[area_indices[3]] / 40 
+      summed_spikes= as.list(apply(spks, 2, mean))
+      df[index, paste0("TB", 1:40)] = summed_spikes
+
+  }
+  }
+  return(df)
+}
+
+integrated_test = test_integration(test_frame)
+```
+
+```{r}
+dum = dummyVars(" ~ .", data = dplyr::select(integrated_test, c(mouse, turn_exp)))
+dummy_df = as.data.frame(predict(dum, newdata = dplyr::select(integrated_test, c(mouse, turn_exp))))
+test_data = bind_cols(integrated_test, dummy_df) %>% dplyr::select(-c(mouse, turn_exp))
+test_data$mouseHench = rep(0, 200)
+test_data$mouseForssmann = rep(0, 200)
+```
+
+```{r}
+test.lr = test_data %>% filter(turn_expleft == 1| turn_expright == 1) %>% dplyr::select(-c(turn_expstill, turn_exprandom, turn_expleft, mouseCori))
+test.still = test_data %>% filter(turn_expstill == 1) %>% dplyr::select(-c(turn_expstill, turn_expleft, turn_expright, turn_exprandom, contrast_left, contrast_right, mouseCori))
+test.random = test_data %>% filter(turn_exprandom == 1) %>% dplyr::select(-c(contrast_right, turn_expleft, turn_expright, turn_expstill, turn_exprandom, mouseCori))
+```
+
+```{r}
+test.lr.success = test.lr %>% pull(feedback) %>% mean()
+test.still.success = test.still %>% pull(feedback) %>% mean()
+test.random.success = test.random %>% pull(feedback) %>% mean()
+```
+
+After splitting the test data into 3 subsets of data of the trials with left/right turn expectations, still turn expectations, and random turn expectations, the respective success rates are 76.81%, 66.04%, and 0.44%. When testing each respective data set on the predictive models, the test accuracy for left/right is 70.23%, the test accuracy for still turns is 66.04%, and the test accuracy for random turns is 56.89%. While the test accuracy for the left/right dataset is approximately 6% lower than the success rate, it is still fairly close. Because the sample size of this data is smaller because it was further split into 3 sets, it is expected to have more variance in the accuracy. The test accuracy for still wheel expectation is incredibly close to the success rate at 66.04%, indicating fair performance. The random model success rate is approximately 6.9% higher than the expected success rate but this could also be due to the variance due to small sample size. In conclusion, the left/right model performed slightly worse than it did during model building but the still wheel and random turn expectation models performed at equal or better performance. 
+
+```{r}
+random.test.pred = predict(ridge_random, dplyr::select(test.random, -feedback) %>% as.matrix(), type = "response")  %>% round()
+random.test.performance = mean(random.test.pred == test.random$feedback)
+```
+
+```{r}
+lr.test.pred = predict(rf.lr.cv, newdata = test.lr %>% dplyr::select(-feedback))
+lr.test.performance = mean(lr.test.pred == test.lr$feedback)
+```
+
+```{r}
+still.test.pred = predict(rf_still, newdata = test.still %>% dplyr::select(-feedback))
+still.test.performance = mean(still.test.pred == test.still$feedback)
+```
+
+
+### Section 6: Discussion      
+
+This project consisted of data analysis and wrangling to reveal the features which would help predict the feedback type from the information provided in a mouse's trial. It was noted that there was great heterogeneity across sessions and trials, but also homogeneity which was noticed while noticing the averaged neural spike patterns of the different correct turn expectations. Splitting the data set into 3 subsets to create 3 models depending on the turn expectation proved to be helpful for being able to select the best model for each type of turn, but also resulted in models that did not perform as well as expected. By exploring the neural behavior of each turn expectation, I had thought that making 3 different models would result in better accuracy for each type of expected turn, but the models performed relatively closely to the original success rates. However, these models were ultimately chosen for the final prediction model because the test accuracy especially for the left/right dataset during model building was considerably higher than the original success rate. This accuracy, however, dropped for the new test data. However, this could be because of the smaller sample size after dividing the already smaller dataset into 3 datasets. In the future, I would experiment more with feature engineering because so many categorical variables were one-hot encoded, which may have contributed a lot of the noise in the dataset. I would try label encoding or try more models with a lot less features. Additionally, I would also experiment more with creating one model which encompasses all of the turn expectations. Overall, a very in-depth exploratory data analysis was performed on the behavior which led to success and unsuccessful decisions, ultimately leading to building a prediction model consisting of 3 models to account for the heterogeneity across trials. 
+
+### Acknowledgements    
+
+ChatGPT: https://chat.openai.com/share/8d5fc77c-264f-4e1b-aaed-3da33e8721e4
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+
